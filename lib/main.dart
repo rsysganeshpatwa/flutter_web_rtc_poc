@@ -116,13 +116,10 @@ class _VideoConferenceState extends State<VideoConference> {
 
     _localRenderer.srcObject = _localStream;
  // Initialize pc
-  RTCPeerConnection pc = await createPeerConnection(configuration, constraints);
 
-  pc.addStream(_localStream);
 
-  // Create an offer or answer and start the connection process
-  RTCSessionDescription description = await pc.createOffer();
-  await pc.setLocalDescription(description);
+ 
+
 
 
   // Send the offer or answer to the remote peer...
