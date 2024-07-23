@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
+
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
 import 'package:socket_io_client/socket_io_client.dart' as IO;
-import 'package:uuid/uuid.dart';
-
-
-import 'dart:html' as html;
 
 void main() {
   runApp(MyApp());
@@ -14,129 +12,99 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: JoinPage(),
-    );
-  }
-}
-
-class JoinPage extends StatelessWidget {
-  final TextEditingController _roomController = TextEditingController();
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Join Room'),
-      ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              TextField(
-                controller: _roomController,
-                decoration: InputDecoration(
-                  labelText: 'Room ID',
-                ),
-              ),
-              SizedBox(height: 20),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          VideoConference(roomId: _roomController.text),
-                    ),
-                  );
-                },
-                child: Text('Join'),
-              ),
-            ],
-          ),
-        ),
-      ),
+      home: VideoConference(),
     );
   }
 }
 
 class VideoConference extends StatefulWidget {
-  final String roomId;
-
-  VideoConference({required this.roomId});
-
   @override
   _VideoConferenceState createState() => _VideoConferenceState();
 }
 
 class _VideoConferenceState extends State<VideoConference> {
-  late html.WindowBase _popupWindow;
   late IO.Socket socket;
-  late RTCPeerConnection _peerConnection;
-  late MediaStream _localStream;
+
+  RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+
   Map<String, RTCVideoRenderer> _remoteRenderers = {};
-  final _localRenderer = RTCVideoRenderer();
-  final _uuid = Uuid();
-  late String _id;
-  bool _isAudioEnabled = true;
+
+  Map<String, RTCPeerConnection> _peerConnections = {};
+
+  late MediaStream _localStream;
+
+  List<String> users = [];
+
+  String roomId = 'test_room';
 
   @override
   void initState() {
     super.initState();
-    _localRenderer.initialize();
-    _id = _uuid.v4();
+
+    _initializeRenderer();
+
     _initSocket();
+
     _initLocalStream();
   }
 
-  @override
-  void dispose() {
-    _localRenderer.dispose();
-    _remoteRenderers.values.forEach((renderer) => renderer.dispose());
-    socket.dispose();
-    super.dispose();
+  void _initializeRenderer() async {
+    await _localRenderer.initialize();
   }
 
   void _initSocket() {
-    socket = IO.io('https://node-soket-video-eb793gy8z-ganeshs-projects-3b1b16ca.vercel.app', <String, dynamic>{
+    socket =
+        IO.io('https://lace-transparent-dance.glitch.me', <String, dynamic>{
       'transports': ['websocket'],
     });
-    socket.on('connect', (_) {
-      print('Connected to the server');
-      socket.emit('join', widget.roomId);
-    });
-    socket.on('user-joined', (userId) {
-      print('User joined: $userId');
-      if (userId != _id) {
-        _createOffer(userId);
-      }
-    });
-    socket.on('signal', (data) async {
-      var signal = data['signal'];
-      var from = data['from'];
-      if (signal['type'] == 'offer') {
-        await _peerConnection.setRemoteDescription(
-            RTCSessionDescription(signal['sdp'], signal['type']));
 
-        _createAnswer(from);
-      } else if (signal['type'] == 'answer') {
-        await _peerConnection.setRemoteDescription(
-            RTCSessionDescription(signal['sdp'], signal['type']));
-      } else if (signal['type'] == 'candidate') {
-        await _peerConnection.addCandidate(RTCIceCandidate(
-            signal['candidate'], signal['sdpMid'], signal['sdpMLineIndex']));
+    socket.on('connect', (_) {
+      print('connected');
+
+      socket.emit('join', roomId);
+    });
+
+    socket.on('user-joined', (userId) {
+      print('user-joined');
+      setState(() {
+        users.add(userId);
+      });
+
+      _createPeerConnection(userId, true);
+    });
+
+    socket.on('signal', (data) async {
+      var pc = _peerConnections[data['from']];
+
+      if (pc != null) {
+        var description = RTCSessionDescription(
+            data['signal']['sdp'], data['signal']['type']);
+
+        await pc.setRemoteDescription(description);
+
+        if (data['signal']['type'] == 'offer') {
+          var answer = await pc.createAnswer();
+
+          await pc.setLocalDescription(answer);
+
+          socket.emit('signal', {
+            'signal': answer.toMap(),
+            'to': data['from'],
+          });
+        }
       }
     });
+
     socket.on('user-left', (userId) {
-      print('User left: $userId');
-      if (_remoteRenderers.containsKey(userId)) {
-        setState(() {
-          _remoteRenderers[userId]?.srcObject = null;
-          _remoteRenderers[userId]?.dispose();
-          _remoteRenderers.remove(userId);
-        });
-      }
+      var renderer = _remoteRenderers.remove(userId);
+
+      renderer?.dispose();
+
+      _peerConnections.remove(userId)?.close();
+
+      setState(() {
+        users.remove(userId);
+      });
     });
   }
 
@@ -145,119 +113,149 @@ class _VideoConferenceState extends State<VideoConference> {
       'video': true,
       'audio': true,
     });
-    setState(() {
-      _localRenderer.srcObject = _localStream;
-    });
-    _createPeerConnection();
+
+    _localRenderer.srcObject = _localStream;
+ // Initialize pc
+  RTCPeerConnection pc = await createPeerConnection(configuration, constraints);
+
+  pc.addStream(_localStream);
+
+  // Create an offer or answer and start the connection process
+  RTCSessionDescription description = await pc.createOffer();
+  await pc.setLocalDescription(description);
+
+
+  // Send the offer or answer to the remote peer...
+
+
+    setState(() {});
   }
 
-  void _createPeerConnection() async {
-    _peerConnection = await createPeerConnection({
+  Future<void> _createPeerConnection(String userId, bool isOffer) async {
+    var pc = await createPeerConnection({
       'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
+        {'urls': 'stun:stun.l.google.com:19302'}
       ],
     });
-    _peerConnection.addStream(_localStream);
-    _peerConnection.onIceCandidate = (candidate) {
-      socket.emit('signal', {
-        'to': _id,
-        'signal': {
-          'type': 'candidate',
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMlineIndex,
-        },
-      });
+
+    pc.onIceCandidate = (candidate) {
+      //print(candidate);
+      if (candidate != null) {
+        socket.emit('signal', {
+          'signal': candidate.toMap(),
+          'to': userId,
+        });
+      }
     };
-    _peerConnection.onAddStream = (stream) {
-      setState(() {
+
+  
+
+    pc.onTrack = (RTCTrackEvent event) {
+      print('onTrack: ${event.track.kind}');
+      if (event.track.kind == 'video') {
         var renderer = RTCVideoRenderer();
-        renderer.initialize();
-        renderer.srcObject = stream;
-        _remoteRenderers[_id] = renderer;
-      });
+
+        renderer.initialize().then((_) {
+          print('renderer');
+          renderer.srcObject = event.streams[0];
+          print(event.streams[0]);
+          print(_remoteRenderers.length);
+           _remoteRenderers[userId] = renderer;
+
+          setState(() {
+           
+          });
+        });
+      }
     };
+
+    pc.addStream(_localStream);
+
+    _peerConnections[userId] = pc;
+
+    if (isOffer) {
+      var offer = await pc.createOffer();
+
+      await pc.setLocalDescription(offer);
+
+      socket.emit('signal', {
+        'signal': offer.toMap(),
+        'to': userId,
+      });
+    }
   }
 
-  void _createOffer(String userId) async {
-    var offer = await _peerConnection.createOffer();
-    await _peerConnection.setLocalDescription(offer);
-    socket.emit('signal', {
-      'to': userId,
-      'from': _id,
-      'signal': {
-        'type': 'offer',
-        'sdp': offer.sdp,
-      },
-    });
-  }
+  @override
+  void dispose() {
+    _localRenderer.dispose();
 
-  void _createAnswer(String userId) async {
-    var answer = await _peerConnection.createAnswer();
-    await _peerConnection.setLocalDescription(answer);
-    socket.emit('signal', {
-      'to': userId,
-      'from': _id,
-      'signal': {
-        'type': 'answer',
-        'sdp': answer.sdp,
-      },
-    });
-  }
+    _peerConnections.forEach((_, pc) => pc.close());
 
-  void _toggleAudio() {
-    bool enabled = _localStream.getAudioTracks()[0].enabled;
-    _localStream.getAudioTracks()[0].enabled = !enabled;
-    setState(() {
-      _isAudioEnabled = !enabled;
-    });
-  }
+    _remoteRenderers.forEach((_, renderer) => renderer.dispose());
 
-  void _openInNewTab() {
-    final url = 'http://localhost:3000/room/${widget.roomId}';
-    _popupWindow = html.window.open(url, 'Video Conference');
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Video Conference'),
-      ),
-      body: Column(
+      appBar: AppBar(title: Text('Video Conference')),
+      body: Row(
         children: [
           Expanded(
-            child: RTCVideoView(_localRenderer),
-          ),
-          Expanded(
-            child: GridView.builder(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-              ),
-              itemCount: _remoteRenderers.length,
-              itemBuilder: (context, index) {
-                var userId = _remoteRenderers.keys.elementAt(index);
-                var renderer = _remoteRenderers[userId];
-                return RTCVideoView(renderer!);
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            flex: 3,
+            child: Column(
               children: [
-                ElevatedButton(
-                  onPressed: _toggleAudio,
-                  child:
-                      Text(_isAudioEnabled ? 'Disable Audio' : 'Enable Audio'),
+                Expanded(
+                  flex: 1,
+                  child: RTCVideoView(_localRenderer),
                 ),
-                SizedBox(width: 20),
-                ElevatedButton(
-                  onPressed: _openInNewTab,
-                  child: Text('Open in New Tab'),
+                Expanded(
+                  flex: 3,
+                  child: GridView.builder(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      childAspectRatio: 1.0,
+                      mainAxisSpacing: 8.0,
+                      crossAxisSpacing: 8.0,
+                    ),
+                    itemCount: _remoteRenderers.length,
+                    itemBuilder: (context, index) {
+                      var renderer = _remoteRenderers.values.elementAt(index);
+
+                      return RTCVideoView(renderer);
+                    },
+                  ),
                 ),
               ],
+            ),
+          ),
+          Expanded(
+            flex: 1,
+            child: Container(
+              color: Colors.grey[200],
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text(
+                      'Users in Room',
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: users.length,
+                      itemBuilder: (context, index) {
+                        return ListTile(
+                          title: Text(users[index]),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
